@@ -16,7 +16,9 @@ This repository contains Afaz's personal [`pi`](https://github.com/khatriafaz/my
 
 ## Files
 
-- `index.ts` registers the extension, `/exit`, `/plan`, and the `update_plan` tool.
+- `index.ts` is intentionally minimal and only wires feature modules into pi.
+- `update-plan.ts` registers the `update_plan` tool, `/plan` command, and plan status UI.
+- `exit-command.ts` registers the `/exit` command.
 - `conversation-resources.ts` registers the `conversation_resources` tool, `/resources` command, URL auto-save behavior, and resource UI widgets.
 
 ## Purpose
