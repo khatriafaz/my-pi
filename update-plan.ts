@@ -1,6 +1,6 @@
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
-import { Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 interface PlanItem {
@@ -33,10 +33,6 @@ function reconstructState(ctx: ExtensionContext) {
 	}
 }
 
-function countCompleted(plan: PlanItem[]): number {
-	return plan.filter((item) => item.status === "completed").length;
-}
-
 function validatePlan(plan: PlanItem[]): string | null {
 	const inProgress = plan.filter((item) => item.status === "in_progress");
 	if (inProgress.length > 1) {
@@ -49,83 +45,6 @@ function formatPlanStatus(plan: PlanItem[]): string {
 	const total = plan.length;
 	const completed = plan.filter((item) => item.status === "completed").length;
 	return `${completed}/${total}`;
-}
-
-class PlanViewComponent {
-	private plan: PlanState | null;
-	private theme: Theme;
-	private onClose: () => void;
-	private cachedWidth?: number;
-	private cachedLines?: string[];
-
-	constructor(plan: PlanState | null, theme: Theme, onClose: () => void) {
-		this.plan = plan;
-		this.theme = theme;
-		this.onClose = onClose;
-	}
-
-	handleInput(data: string): void {
-		if (data === "\x1b" || data === "\x03") {
-			this.onClose();
-		}
-	}
-
-	render(width: number): string[] {
-		if (this.cachedLines && this.cachedWidth === width) {
-			return this.cachedLines;
-		}
-
-		const lines: string[] = [];
-		const th = this.theme;
-
-		lines.push("");
-		const title = th.fg("accent", " Plan ");
-		const headerLine =
-			th.fg("borderMuted", "─".repeat(3)) +
-			title +
-			th.fg("borderMuted", "─".repeat(Math.max(0, width - 8)));
-		lines.push(truncateToWidth(headerLine, width));
-		lines.push("");
-
-		if (!this.plan || this.plan.plan.length === 0) {
-			lines.push(truncateToWidth(`  ${th.fg("dim", "No plan items yet.")}`, width));
-		} else {
-			const done = countCompleted(this.plan.plan);
-			const total = this.plan.plan.length;
-			lines.push(truncateToWidth(`  ${th.fg("muted", `${done}/${total} completed`)}`, width));
-			lines.push("");
-
-			if (this.plan.explanation) {
-				const note = th.fg("dim", this.plan.explanation);
-				lines.push(truncateToWidth(`  ${note}`, width));
-				lines.push("");
-			}
-
-			for (const item of this.plan.plan) {
-				let check: string;
-				let style: string;
-				if (item.status === "completed") {
-					check = th.fg("success", "✔");
-					style = th.fg("dim", item.step);
-				} else if (item.status === "in_progress") {
-					check = th.fg("accent", "□");
-					style = th.fg("accent", item.step);
-				} else {
-					check = th.fg("dim", "□");
-					style = th.fg("text", item.step);
-				}
-				lines.push(truncateToWidth(`  ${check} ${style}`, width));
-			}
-		}
-
-		lines.push("");
-		lines.push(truncateToWidth(`  ${th.fg("dim", "Press Escape to close")}`, width));
-		lines.push("");
-
-		this.cachedWidth = width;
-		this.cachedLines = lines;
-		return lines;
-	}
 }
 
 export default function registerUpdatePlan(pi: ExtensionAPI) {
@@ -236,29 +155,4 @@ export default function registerUpdatePlan(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("plan", {
-		description: "Show the current plan",
-		handler: async (_args, ctx) => {
-			if (!ctx.hasUI) {
-				if (!currentPlan || currentPlan.plan.length === 0) {
-					console.log("No plan items yet.");
-					return;
-				}
-				console.log("Updated Plan\n");
-				if (currentPlan.explanation) {
-					console.log(currentPlan.explanation);
-					console.log();
-				}
-				for (const item of currentPlan.plan) {
-					const check = item.status === "completed" ? "✔" : "□";
-					console.log(`${check} ${item.step}`);
-				}
-				return;
-			}
-
-			await ctx.ui.custom<void>((_tui, theme, _kb, done) => {
-				return new PlanViewComponent(currentPlan, theme, () => done());
-			});
-		},
-	});
 }
