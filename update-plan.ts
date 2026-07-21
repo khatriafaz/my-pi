@@ -1,6 +1,6 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
-import { Text } from "@earendil-works/pi-tui";
+import { Text, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 interface PlanItem {
@@ -13,24 +13,9 @@ interface UpdatePlanArgs {
 	plan: PlanItem[];
 }
 
-interface PlanState {
+interface PlanDetails {
 	explanation?: string;
 	plan: PlanItem[];
-}
-
-let currentPlan: PlanState | null = null;
-
-function reconstructState(ctx: ExtensionContext) {
-	currentPlan = null;
-	for (const entry of ctx.sessionManager.getBranch()) {
-		if (entry.type !== "message") continue;
-		const msg = entry.message;
-		if (msg.role !== "toolResult" || msg.toolName !== "update_plan") continue;
-		const details = msg.details as PlanState | undefined;
-		if (details) {
-			currentPlan = { explanation: details.explanation, plan: [...details.plan] };
-		}
-	}
 }
 
 function validatePlan(plan: PlanItem[]): string | null {
@@ -41,118 +26,119 @@ function validatePlan(plan: PlanItem[]): string | null {
 	return null;
 }
 
-function formatPlanStatus(plan: PlanItem[]): string {
-	const total = plan.length;
-	const completed = plan.filter((item) => item.status === "completed").length;
-	return `${completed}/${total}`;
-}
-
 export default function registerUpdatePlan(pi: ExtensionAPI) {
-	pi.on("session_start", async (_event, ctx) => reconstructState(ctx));
-	pi.on("session_tree", async (_event, ctx) => reconstructState(ctx));
-
-	pi.on("turn_end", async (_event, ctx) => {
-		if (currentPlan && currentPlan.plan.length > 0) {
-			const status = formatPlanStatus(currentPlan.plan);
-			const theme = ctx.ui.theme;
-			ctx.ui.setStatus("afaz-plan", theme.fg("dim", `Plan: ${status}`));
-		} else {
-			ctx.ui.setStatus("afaz-plan", "");
-		}
-	});
-
-	const UpdatePlanSchema = Type.Object({
-		explanation: Type.Optional(Type.String({ description: "Optional explanation for the plan update" })),
-		plan: Type.Array(
-			Type.Object({
-				step: Type.String({ description: "The step description" }),
-				status: StringEnum(["pending", "in_progress", "completed"] as const),
-			}),
-			{ description: "The list of steps" },
-		),
-	});
+	const UpdatePlanSchema = Type.Object(
+		{
+			explanation: Type.Optional(Type.String({ description: "Optional explanation for the plan update" })),
+			plan: Type.Array(
+				Type.Object(
+					{
+						step: Type.String({ description: "The step description" }),
+						status: StringEnum(["pending", "in_progress", "completed"] as const),
+					},
+					{ additionalProperties: false },
+				),
+				{ description: "The list of steps" },
+			),
+		},
+		{ additionalProperties: false },
+	);
 
 	pi.registerTool({
 		name: "update_plan",
 		label: "Update Plan",
 		description:
 			"Updates the task plan. Provide an optional explanation and a list of plan items, each with a step and status. At most one step can be in_progress at a time.",
+		promptSnippet: "Track steps and progress for non-trivial tasks",
+		promptGuidelines: [
+			"Use update_plan for non-trivial, multi-step work, when the user explicitly asks for a plan or TODOs, or when new work must be completed before yielding; do not pad simple tasks with a plan.",
+			"Keep update_plan steps meaningful, logically ordered, concise, and easy to verify; mark completed work before moving to the next step and keep at most one step in_progress.",
+			"When an update_plan changes during the task, provide an explanation of the rationale.",
+			"Do not repeat the full plan after calling update_plan because the harness already displays it; briefly summarize the change and the next step instead.",
+		],
 		parameters: UpdatePlanSchema,
+		renderShell: "self",
 
 		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
 			const args = params as UpdatePlanArgs;
 
 			const validationError = validatePlan(args.plan);
 			if (validationError) {
-				return {
-					content: [{ type: "text", text: `Error: ${validationError}` }],
-					isError: true,
-					details: { ...(currentPlan ?? { plan: [] }), error: validationError } as PlanState & { error?: string },
-				};
+				throw new Error(validationError);
 			}
 
-			currentPlan = {
+			const details: PlanDetails = {
 				explanation: args.explanation,
 				plan: args.plan.map((item) => ({ step: item.step, status: item.status })),
 			};
 
 			return {
 				content: [{ type: "text", text: "Plan updated" }],
-				details: currentPlan,
+				details,
 			};
 		},
 
-		renderCall(args, theme, _context) {
-			const plan = (args as UpdatePlanArgs).plan;
-			let text = theme.fg("toolTitle", theme.bold("update_plan "));
-			text += theme.fg("muted", `${plan.length} step(s)`);
-			return new Text(text, 0, 0);
+		renderCall(_args, _theme, _context) {
+			return { render: () => [], invalidate: () => {} };
 		},
 
-		renderResult(result, { expanded }, theme, _context) {
-			const details = result.details as (PlanState & { error?: string }) | undefined;
+		renderResult(result, _options, theme, _context) {
+			const details = result.details as PlanDetails | undefined;
 			if (!details) {
 				const text = result.content[0];
-				return new Text(text?.type === "text" ? text.text : "", 0, 0);
+				return new Text(theme.fg("error", text?.type === "text" ? text.text : ""), 0, 0);
 			}
 
-			if (details.error) {
-				return new Text(theme.fg("error", `Error: ${details.error}`), 0, 0);
-			}
+			return {
+				render(width: number) {
+					const lines = [truncateToWidth(`${theme.fg("dim", "• ")}${theme.bold("Updated Plan")}`, width)];
+					let hasIndentedContent = false;
 
-			if (details.plan.length === 0) {
-				return new Text(theme.fg("dim", "(no steps provided)"), 0, 0);
-			}
+					const appendWrapped = (prefix: string, text: string) => {
+						const wrapWidth = Math.max(1, width - visibleWidth(prefix));
+						const wrapped = wrapTextWithAnsi(text, wrapWidth);
+						const continuation = " ".repeat(visibleWidth(prefix));
+						lines.push(truncateToWidth(`${prefix}${wrapped[0] ?? ""}`, width));
+						for (const line of wrapped.slice(1)) {
+							lines.push(truncateToWidth(`${continuation}${line}`, width));
+						}
+					};
 
-			let text = theme.fg("accent", theme.bold("Updated Plan"));
+					const branchPrefix = () => {
+						const prefix = hasIndentedContent ? "    " : "  └ ";
+						hasIndentedContent = true;
+						return theme.fg("dim", prefix);
+					};
 
-			if (details.explanation) {
-				text += `\n${theme.fg("dim", details.explanation)}`;
-			}
+					const explanation = details.explanation?.trim();
+					if (explanation) {
+						appendWrapped(branchPrefix(), theme.fg("dim", theme.italic(explanation)));
+					}
 
-			const displayPlan = expanded ? details.plan : details.plan.slice(0, 10);
-			for (const item of displayPlan) {
-				let check: string;
-				let stepText: string;
-				if (item.status === "completed") {
-					check = theme.fg("success", "✔ ");
-					stepText = theme.fg("dim", item.step);
-				} else if (item.status === "in_progress") {
-					check = theme.fg("accent", "□ ");
-					stepText = theme.fg("accent", item.step);
-				} else {
-					check = theme.fg("dim", "□ ");
-					stepText = theme.fg("text", item.step);
-				}
-				text += `\n${check}${stepText}`;
-			}
+					if (details.plan.length === 0) {
+						appendWrapped(branchPrefix(), theme.fg("dim", theme.italic("(no steps provided)")));
+					}
 
-			if (!expanded && details.plan.length > 10) {
-				text += `\n${theme.fg("dim", `... ${details.plan.length - 10} more`)}`;
-			}
+					for (const item of details.plan) {
+						let icon: string;
+						let step: string;
+						if (item.status === "completed") {
+							icon = "✔ ";
+							step = theme.fg("dim", theme.strikethrough(item.step));
+						} else if (item.status === "in_progress") {
+							icon = theme.fg("accent", theme.bold("□ "));
+							step = theme.fg("accent", theme.bold(item.step));
+						} else {
+							icon = theme.fg("dim", "□ ");
+							step = theme.fg("dim", item.step);
+						}
+						appendWrapped(`${branchPrefix()}${icon}`, step);
+					}
 
-			return new Text(text, 0, 0);
+					return lines;
+				},
+				invalidate() {},
+			};
 		},
 	});
-
 }
